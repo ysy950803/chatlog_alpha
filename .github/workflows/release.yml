@@ -50,4 +50,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chatlog-snapshot
-          path: dist/chatlog_windows_amd64_v1/chatlog.exe
+          path: dist/**/*.exe
