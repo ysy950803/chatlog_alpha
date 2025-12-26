@@ -169,7 +169,11 @@ func (s *Service) DecryptDBFile(dbFile string) error {
 		return err
 	}
 
-	output := filepath.Join(s.conf.GetWorkDir(), dbFile[len(s.conf.GetDataDir()):])
+	relPath, err := filepath.Rel(s.conf.GetDataDir(), dbFile)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path for %s: %w", dbFile, err)
+	}
+	output := filepath.Join(s.conf.GetWorkDir(), relPath)
 	if err := util.PrepareDir(filepath.Dir(output)); err != nil {
 		return err
 	}
