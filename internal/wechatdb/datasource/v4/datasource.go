@@ -857,7 +857,7 @@ func (ds *DataSource) GetTables(group, file string) ([]string, error) {
 	return tables, nil
 }
 
-func (ds *DataSource) GetTableData(group, file, table string, limit, offset int) ([]map[string]interface{}, error) {
+func (ds *DataSource) GetTableData(group, file, table string, limit, offset int, keyword string) ([]map[string]interface{}, error) {
 	// Verify file belongs to group
 	paths, err := ds.dbm.GetDBPath(group)
 	if err != nil {
@@ -879,13 +879,99 @@ func (ds *DataSource) GetTableData(group, file, table string, limit, offset int)
 		return nil, err
 	}
 
-	// Validate table name to prevent SQL injection (basic check)
-	// Although parameterized queries are used for values, table names usually can't be parameterized in standard SQL drivers easily without safe string construction.
-	// We can check if table exists first using the same query as GetTables or just simple validation.
-	// For now, let's trust the input is a valid table name from the list, but maybe wrap it in quotes.
+	// 1. Get columns to build search query if keyword provided
+	var columns []string
+	if keyword != "" {
+		rows, err := db.Query(fmt.Sprintf("SELECT * FROM \"%s\" LIMIT 0", table))
+		if err != nil {
+			return nil, err
+		}
+		columns, err = rows.Columns()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 2. Build Query
+	query := fmt.Sprintf("SELECT * FROM \"%s\"", table)
+	var args []interface{}
 	
-	// Query data
-	query := fmt.Sprintf("SELECT * FROM \"%s\" LIMIT %d OFFSET %d", table, limit, offset)
+	if keyword != "" && len(columns) > 0 {
+		var conditions []string
+		for _, col := range columns {
+			conditions = append(conditions, fmt.Sprintf("\"%s\" LIKE ?", col))
+			args = append(args, "%"+keyword+"%")
+		}
+		query += " WHERE " + strings.Join(conditions, " OR ")
+	}
+	
+	query += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Get columns again (in case * returns diff order or something, though standard is consistent)
+	resCols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		values := make([]interface{}, len(resCols))
+		valuePtrs := make([]interface{}, len(resCols))
+		for i := range resCols {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return nil, err
+		}
+
+		entry := make(map[string]interface{})
+		for i, col := range resCols {
+			var v interface{}
+			val := values[i]
+			b, ok := val.([]byte)
+			if ok {
+				v = string(b)
+			} else {
+				v = val
+			}
+			entry[col] = v
+		}
+		result = append(result, entry)
+	}
+
+	return result, nil
+}
+
+func (ds *DataSource) ExecuteSQL(group, file, query string) ([]map[string]interface{}, error) {
+	// Verify file belongs to group
+	paths, err := ds.dbm.GetDBPath(group)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	for _, p := range paths {
+		if p == file {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("file %s not found in group %s", file, group)
+	}
+
+	db, err := ds.dbm.OpenDB(file)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
@@ -899,7 +985,6 @@ func (ds *DataSource) GetTableData(group, file, table string, limit, offset int)
 
 	result := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		// Create a slice of interface{} to hold the values
 		values := make([]interface{}, len(columns))
 		valuePtrs := make([]interface{}, len(columns))
 		for i := range columns {
@@ -910,7 +995,6 @@ func (ds *DataSource) GetTableData(group, file, table string, limit, offset int)
 			return nil, err
 		}
 
-		// Create map for this row
 		entry := make(map[string]interface{})
 		for i, col := range columns {
 			var v interface{}

@@ -150,6 +150,10 @@ func (w *DB) GetTables(group, file string) ([]string, error) {
 	return w.ds.GetTables(group, file)
 }
 
-func (w *DB) GetTableData(group, file, table string, limit, offset int) ([]map[string]interface{}, error) {
-	return w.ds.GetTableData(group, file, table, limit, offset)
+func (w *DB) GetTableData(group, file, table string, limit, offset int, keyword string) ([]map[string]interface{}, error) {
+	return w.ds.GetTableData(group, file, table, limit, offset, keyword)
+}
+
+func (w *DB) ExecuteSQL(group, file, query string) ([]map[string]interface{}, error) {
+	return w.ds.ExecuteSQL(group, file, query)
 }

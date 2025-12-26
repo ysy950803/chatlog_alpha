@@ -134,11 +134,18 @@ func (s *Service) GetTables(group, file string) ([]string, error) {
 	return s.db.GetTables(group, file)
 }
 
-func (s *Service) GetTableData(group, file, table string, limit, offset int) ([]map[string]interface{}, error) {
+func (s *Service) GetTableData(group, file, table string, limit, offset int, keyword string) ([]map[string]interface{}, error) {
 	if s.db == nil {
 		return nil, nil
 	}
-	return s.db.GetTableData(group, file, table, limit, offset)
+	return s.db.GetTableData(group, file, table, limit, offset, keyword)
+}
+
+func (s *Service) ExecuteSQL(group, file, query string) ([]map[string]interface{}, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+	return s.db.ExecuteSQL(group, file, query)
 }
 
 func (s *Service) initWebhook() error {

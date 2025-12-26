@@ -64,6 +64,7 @@ func (s *Service) initAPIRouter() {
 		api.GET("/db", s.handleGetDBs)
 		api.GET("/db/tables", s.handleGetDBTables)
 		api.GET("/db/data", s.handleGetDBTableData)
+		api.GET("/db/query", s.handleExecuteSQL)
 		api.POST("/cache/clear", s.handleClearCache)
 	}
 }
@@ -733,8 +734,10 @@ func (s *Service) handleGetDBTableData(c *gin.Context) {
 	group := c.Query("group")
 	file := c.Query("file")
 	table := c.Query("table")
+	keyword := c.Query("keyword")
 	limitStr := c.DefaultQuery("limit", "20")
 	offsetStr := c.DefaultQuery("offset", "0")
+	format := strings.ToLower(c.Query("format"))
 
 	if group == "" || file == "" || table == "" {
 		errors.Err(c, errors.InvalidArg("group, file or table"))
@@ -746,11 +749,120 @@ func (s *Service) handleGetDBTableData(c *gin.Context) {
 	fmt.Sscanf(limitStr, "%d", &limit)
 	fmt.Sscanf(offsetStr, "%d", &offset)
 
-	data, err := s.db.GetTableData(group, file, table, limit, offset)
+	// If exporting, fetch all matching rows (ignore pagination if user wants all? or respect pagination?)
+	// Usually export means "export all matching".
+	if format == "csv" || format == "xlsx" || format == "excel" {
+		limit = -1 // No limit
+		offset = 0
+	}
+
+	data, err := s.db.GetTableData(group, file, table, limit, offset, keyword)
 	if err != nil {
 		errors.Err(c, err)
 		return
 	}
+
+	if format == "csv" || format == "xlsx" || format == "excel" {
+		s.exportData(c, data, format, table)
+		return
+	}
+	
 	c.JSON(http.StatusOK, data)
+}
+
+func (s *Service) handleExecuteSQL(c *gin.Context) {
+	group := c.Query("group")
+	file := c.Query("file")
+	query := c.Query("sql")
+	format := strings.ToLower(c.Query("format"))
+
+	if group == "" || file == "" || query == "" {
+		errors.Err(c, errors.InvalidArg("group, file or sql"))
+		return
+	}
+
+	data, err := s.db.ExecuteSQL(group, file, query)
+	if err != nil {
+		errors.Err(c, err)
+		return
+	}
+
+	if format == "csv" || format == "xlsx" || format == "excel" {
+		s.exportData(c, data, format, "query_result")
+		return
+	}
+
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Service) exportData(c *gin.Context, data []map[string]interface{}, format string, filename string) {
+	if len(data) == 0 {
+		c.String(http.StatusOK, "")
+		return
+	}
+
+	// Extract headers
+	var headers []string
+	for k := range data[0] {
+		headers = append(headers, k)
+	}
+	// Sort headers for consistency
+	// sort.Strings(headers) // We need sort package
+
+	if format == "csv" {
+		c.Writer.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		c.Writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.csv", filename))
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Flush()
+
+		w := csv.NewWriter(c.Writer)
+		w.Write(headers)
+		for _, row := range data {
+			var record []string
+			for _, h := range headers {
+				val := row[h]
+				if val == nil {
+					record = append(record, "")
+				} else {
+					record = append(record, fmt.Sprintf("%v", val))
+				}
+			}
+			w.Write(record)
+		}
+		w.Flush()
+	} else {
+		// Excel
+		f := excelize.NewFile()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Error().Err(err).Msg("Failed to close excel file")
+			}
+		}()
+		
+		sheet := "Sheet1"
+		index, _ := f.NewSheet(sheet)
+		
+		// Write headers
+		for i, h := range headers {
+			cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+			f.SetCellValue(sheet, cell, h)
+		}
+		
+		// Write data
+		for r, row := range data {
+			for cIdx, h := range headers {
+				val := row[h]
+				cell, _ := excelize.CoordinatesToCellName(cIdx+1, r+2)
+				f.SetCellValue(sheet, cell, val)
+			}
+		}
+		
+		f.SetActiveSheet(index)
+		c.Writer.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		c.Writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.xlsx", filename))
+		if err := f.Write(c.Writer); err != nil {
+			log.Error().Err(err).Msg("Failed to write excel file")
+		}
+	}
 }
 

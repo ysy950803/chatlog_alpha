@@ -39,7 +39,10 @@ type DataSource interface {
 	GetTables(group, file string) ([]string, error)
 
 	// 获取指定表的数据
-	GetTableData(group, file, table string, limit, offset int) ([]map[string]interface{}, error)
+	GetTableData(group, file, table string, limit, offset int, keyword string) ([]map[string]interface{}, error)
+
+	// 执行 SQL 查询
+	ExecuteSQL(group, file, query string) ([]map[string]interface{}, error)
 
 	Close() error
 }
