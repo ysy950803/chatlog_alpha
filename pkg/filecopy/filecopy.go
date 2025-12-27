@@ -72,6 +72,7 @@ type FileCopyManager struct {
 	wg           sync.WaitGroup     // WaitGroup for goroutine synchronization
 	cacheSize    int64              // Current number of cached entries (atomic)
 	locks        sync.Map           // Locks for concurrent file copies: key -> *sync.Mutex
+	pendingDeletions sync.Map       // Tracks files that failed to delete: key=path -> value=timestamp
 }
 
 // FileIndexEntry represents an indexed temporary file with comprehensive metadata.
@@ -304,8 +305,9 @@ func newManager(instanceID string) *FileCopyManager {
 	fm.buildFileIndex()
 
 	// Start managed goroutines with proper lifecycle
-	fm.wg.Add(3)
+	fm.wg.Add(4)
 	go fm.asyncDeletionWorker()
+	go fm.retryDeletionWorker()
 	go fm.scheduleDelayedCleanup()
 	go fm.schedulePeriodicCleanup()
 
@@ -340,6 +342,42 @@ func (fm *FileCopyManager) asyncDeletionWorker() {
 	}
 }
 
+// retryDeletionWorker periodically retries deletion of files that failed to delete previously.
+// This handles cases where files were temporarily locked (e.g., by AV or database processes).
+func (fm *FileCopyManager) retryDeletionWorker() {
+	defer fm.wg.Done()
+
+	// Retry more frequently (every 30 seconds) to clear up files as soon as locks are released
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-fm.ctx.Done():
+			return // Context cancelled
+		case <-ticker.C:
+			fm.processPendingDeletions()
+		}
+	}
+}
+
+// processPendingDeletions attempts to delete all files in the pending list
+func (fm *FileCopyManager) processPendingDeletions() {
+	fm.pendingDeletions.Range(func(key, value any) bool {
+		filePath := key.(string)
+		
+		// Try to delete again
+		err := os.Remove(filePath)
+		if err == nil || os.IsNotExist(err) {
+			// Success or file already gone, remove from pending
+			fm.pendingDeletions.Delete(key)
+		}
+		// If still fails, keep in map for next retry
+		
+		return true // Continue iteration
+	})
+}
+
 // processDeletion handles a single file deletion with safety checks
 func (fm *FileCopyManager) processDeletion(filePath string) {
 	// Skip .tmp files to avoid interfering with atomic operations
@@ -351,8 +389,16 @@ func (fm *FileCopyManager) processDeletion(filePath string) {
 	// This ensures that any ongoing rename operations from other goroutines complete first
 	time.Sleep(10 * time.Millisecond)
 
-	// Allow deletion failures (file might still be in use)
-	os.Remove(filePath)
+	// Try to delete the file
+	if err := os.Remove(filePath); err != nil {
+		if !os.IsNotExist(err) {
+			// If deletion failed (e.g., file locked), add to pending deletions for retry
+			fm.pendingDeletions.Store(filePath, time.Now())
+		}
+	} else {
+		// Deletion successful, ensure it's removed from pending list if it was there
+		fm.pendingDeletions.Delete(filePath)
+	}
 }
 
 // buildFileIndex scans the temporary directory and organizes ALL instanceID prefixed files.
